@@ -10,7 +10,7 @@ import AVFoundation
 import CoreLocation
 import Photos
 
-class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelegate, ItemSelectionViewControllerDelegate {
+class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelegate, ItemSelectionViewControllerDelegate, MyPickerViewProtocol {
     
     private var spinner: UIActivityIndicatorView!
     
@@ -36,7 +36,11 @@ class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelega
         photoQualityPrioritizationSegControl.isEnabled = false
         captureModeControl.isEnabled = false
         HDRVideoModeButton.isHidden = true
-        
+        picker = MyPickerView()
+        myPickerView.delegate = picker
+        myPickerView.dataSource = picker
+        picker.propertyThatReferencesThisViewController = self
+                
         // Set up the video preview view.
         previewView.session = session
 		
@@ -217,19 +221,19 @@ class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelega
          Do not create an AVCaptureMovieFileOutput when setting up the session because
          Live Photo is not supported when AVCaptureMovieFileOutput is added to the session.
          */
-        session.sessionPreset = .photo
+        session.sessionPreset = AVCaptureSession.Preset.photo
         
         // Add video input.
         do {
             var defaultVideoDevice: AVCaptureDevice?
             
-            // Choose the back dual camera, if available, otherwise default to a wide angle camera.
+            // Choose the back dual wide camera, if available, otherwise default to a dual camera.
             
-            if let dualCameraDevice = AVCaptureDevice.default(.builtInDualCamera, for: .video, position: .back) {
-                defaultVideoDevice = dualCameraDevice
-            } else if let dualWideCameraDevice = AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back) {
-                // If a rear dual camera is not available, default to the rear dual wide camera.
+            if let dualWideCameraDevice = AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back) {
                 defaultVideoDevice = dualWideCameraDevice
+            } else if let dualCameraDevice = AVCaptureDevice.default(.builtInDualCamera, for: .video, position: .back) {
+                // If a rear dual wide camera is not available, default to the rear dual camera.
+                defaultVideoDevice = dualCameraDevice
             } else if let backCameraDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
                 // If a rear dual wide camera is not available, default to the rear wide angle camera.
                 defaultVideoDevice = backCameraDevice
@@ -237,12 +241,16 @@ class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelega
                 // If the rear wide angle camera isn't available, default to the front wide angle camera.
                 defaultVideoDevice = frontCameraDevice
             }
+            
+            defaultVideoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+            
             guard let videoDevice = defaultVideoDevice else {
                 print("Default video device is unavailable.")
                 setupResult = .configurationFailed
                 session.commitConfiguration()
                 return
             }
+            
             let videoDeviceInput = try AVCaptureDeviceInput(device: videoDevice)
             
             if session.canAddInput(videoDeviceInput) {
@@ -607,13 +615,15 @@ class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelega
     
     @IBAction private func focusAndExposeTap(_ gestureRecognizer: UITapGestureRecognizer) {
         let devicePoint = previewView.videoPreviewLayer.captureDevicePointConverted(fromLayerPoint: gestureRecognizer.location(in: gestureRecognizer.view))
-        focus(with: .autoFocus, exposureMode: .autoExpose, at: devicePoint, monitorSubjectAreaChange: true)
+        focus(with: .locked, exposureMode: .autoExpose, at: devicePoint, monitorSubjectAreaChange: true)
     }
     
     private func focus(with focusMode: AVCaptureDevice.FocusMode,
                        exposureMode: AVCaptureDevice.ExposureMode,
                        at devicePoint: CGPoint,
-                       monitorSubjectAreaChange: Bool) {
+                       monitorSubjectAreaChange: Bool,
+                       manFoc: Bool=false,
+                       focalLength: Float=0.0) {
         
         sessionQueue.async {
             let device = self.videoDeviceInput.device
@@ -627,6 +637,18 @@ class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelega
                 if device.isFocusPointOfInterestSupported && device.isFocusModeSupported(focusMode) {
                     device.focusPointOfInterest = devicePoint
                     device.focusMode = focusMode
+                    if manFoc {
+                        print("focusing")
+                        if device.isLockingFocusWithCustomLensPositionSupported{
+                            print("supported")
+                            device.setFocusModeLocked(lensPosition: focalLength)
+                        } else {
+                            print("unsupported")
+                        }
+                        print("focusing done")
+                    } else {
+                        print("auto focus triggered")
+                    }
                 }
                 
                 if device.isExposurePointOfInterestSupported && device.isExposureModeSupported(exposureMode) {
@@ -659,6 +681,7 @@ class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelega
          */
         let videoPreviewLayerOrientation = previewView.videoPreviewLayer.connection?.videoOrientation
         
+        print(picker.focusRange[picker.selectedRow(inComponent: 0)])
         sessionQueue.async {
             if let photoOutputConnection = self.photoOutput.connection(with: .video) {
                 photoOutputConnection.videoOrientation = videoPreviewLayerOrientation!
@@ -1175,7 +1198,7 @@ class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelega
     @objc
     func subjectAreaDidChange(notification: NSNotification) {
         let devicePoint = CGPoint(x: 0.5, y: 0.5)
-        focus(with: .continuousAutoFocus, exposureMode: .continuousAutoExposure, at: devicePoint, monitorSubjectAreaChange: false)
+        focus(with: .locked, exposureMode: .continuousAutoExposure, at: devicePoint, monitorSubjectAreaChange: false)
     }
     
     /// - Tag: HandleRuntimeError
@@ -1287,6 +1310,33 @@ class CameraViewController: UIViewController, AVCaptureFileOutputRecordingDelega
             )
         }
     }
+    
+    @IBOutlet weak var myPickerView: UIPickerView!
+    var picker: MyPickerView!
+    
+    func myPickerDidSelectRow(selectedRowValue: Float) {
+        /*
+        guard let device = AVCaptureDevice.default(for: AVMediaType.video) else { return }
+                if device.isLockingFocusWithCustomLensPositionSupported {
+                    print("focus mode supported")
+                    do{
+                        try device.lockForConfiguration()
+                        device.setFocusModeLocked(lensPosition: selectedRowValue) { (_) in
+                            print("Done Esposure")
+                        }
+                        device.unlockForConfiguration()
+                    }
+                    catch{
+                        print("ERROR: \(String(describing: error.localizedDescription))")
+                    }
+                } else {
+                    print("FocusMode Not Supported")
+                }*/
+        let devicePoint = CGPoint(x: 0.5, y: 0.5)
+        focus(with: .locked, exposureMode: .continuousAutoExposure, at: devicePoint, monitorSubjectAreaChange: false, manFoc: true, focalLength: selectedRowValue)
+    }
+        
+        
 }
 
 extension AVCaptureVideoOrientation {
@@ -1323,3 +1373,31 @@ extension AVCaptureDevice.DiscoverySession {
         return uniqueDevicePositions.count
     }
 }
+
+class MyPickerView: UIPickerView, UIPickerViewDataSource, UIPickerViewDelegate {
+    let focusRange:[Float] = Array(stride(from: 0.0, to: 1.01, by: 0.01))
+    var propertyThatReferencesThisViewController:MyPickerViewProtocol?
+    
+    func numberOfComponents(in pickerView: UIPickerView) -> Int {
+        return 1
+    }
+
+    public func pickerView(_ pickerView: UIPickerView, numberOfRowsInComponent component: Int) -> Int {
+        return focusRange.count
+    }
+
+    public func pickerView(_ pickerView: UIPickerView, titleForRow row: Int, forComponent component: Int) -> String? {
+        return String(format:  "%.2f", focusRange[row])
+    }
+    
+    func pickerView(_ pickerView: UIPickerView, didSelectRow row: Int, inComponent component: Int) {
+        let rowValue = focusRange[row]
+        print("rowValue ", rowValue)
+        propertyThatReferencesThisViewController?.myPickerDidSelectRow(selectedRowValue: rowValue)
+    }
+}
+
+protocol MyPickerViewProtocol {
+    func myPickerDidSelectRow(selectedRowValue:Float)
+}
+
